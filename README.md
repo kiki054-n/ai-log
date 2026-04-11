@@ -78,3 +78,4 @@ P = xX + yY + zZ + rR + iI + jJ
 
 - [死にたくない理由](docs/Death-Drive.md) - TTTの6次元で読む生存本能
 - 
+- [0→1ジャンプ事例集](docs/Case-Studies.md) - 人生の片道切符を6次元で分解
