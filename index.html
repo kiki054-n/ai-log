@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wine 9-Point Lattice & Deformable Sphere Model</title>
+    <style>
+        body {
+            margin: 0; padding: 0; display: flex;
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background-color: #121212; color: #fff; overflow: hidden;
+        }
+        #ui-container {
+            width: 360px; padding: 20px; background: rgba(25, 25, 25, 0.9);
+            box-shadow: 2px 0 15px rgba(0,0,0,0.7); z-index: 10;
+            overflow-y: auto; height: 100vh; box-sizing: border-box;
+        }
+        #canvas-container { flex-grow: 1; height: 100vh; position: relative; }
+        h2 { margin-top: 0; color: #e67e22; font-size: 1.1rem; border-bottom: 1px solid #333; padding-bottom: 8px;}
+        .preset-buttons { display: flex; gap: 10px; margin-bottom: 20px; }
+        button {
+            flex: 1; padding: 10px; border: none; border-radius: 4px;
+            background: #333; color: white; cursor: pointer; font-weight: bold; transition: 0.2s;
+        }
+        button:hover { background: #444; }
+        button.active { background: #e67e22; }
+        .slider-group { margin-bottom: 14px; }
+        .slider-label { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px; }
+        input[type=range] { width: 100%; accent-color: #e67e22; }
+        #instructions {
+            position: absolute; bottom: 20px; right: 20px;
+            background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 5px; pointer-events: none; font-size: 0.85rem;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+    <div id="ui-container">
+        <h2>プロファイルプリセット</h2>
+        <div class="preset-buttons">
+            <button id="btn-daily" onclick="loadPreset('daily')">デイリー</button>
+            <button id="btn-premium" onclick="loadPreset('premium')">高級</button>
+        </div>
+
+        <h2>9軸ラティス（正八面体重心 + 中心）</h2>
+        <div id="sliders"></div>
+    </div>
+
+    <div id="canvas-container">
+        <div id="instructions">💡 ドラッグで回転 / スクロールでズーム</div>
+    </div>
+
+    <script>
+        // 正負の組み合わせで正八面体の「面の重心方向（＝立方体の頂点）」8方向を定義
+        const r3 = 1 / Math.sqrt(3);
+
+        const axesConfig = [
+            { id: 'p1', name: '火 (R): 面1 [+++]', dir: new THREE.Vector3( r3,  r3,  r3), color: 0xff4d4d },
+            { id: 'p2', name: '水 (I): 面2 [-++]', dir: new THREE.Vector3(-r3,  r3,  r3), color: 0x4da6ff },
+            { id: 'p3', name: '風 (Z): 面3 [--+]', dir: new THREE.Vector3(-r3, -r3,  r3), color: 0x4dffaf },
+            { id: 'p4', name: '地 (X): 面4 [+-+]', dir: new THREE.Vector3( r3, -r3,  r3), color: 0xd9a74a },
+            { id: 'p5', name: '光 (J): 面5 [++-]', dir: new THREE.Vector3( r3,  r3, -r3), color: 0xffff4d },
+            { id: 'p6', name: '音 (I+Z): 面6 [-+-]', dir: new THREE.Vector3(-r3,  r3, -r3), color: 0xba4dff },
+            { id: 'p7', name: '時 (Y): 面7 [---]', dir: new THREE.Vector3(-r3, -r3, -r3), color: 0xff4da6 },
+            { id: 'p8', name: '空間 (Z+L): 面8 [+--]', dir: new THREE.Vector3( r3, -r3, -r3), color: 0x00f5ff },
+            { id: 'p9', name: '智 (P): 中心・コア', dir: new THREE.Vector3( 0,  0,  0), color: 0xffffff }
+        ];
+
+        const latticeConnections = [
+            [0, 1], [1, 2], [2, 3], [3, 0], 
+            [4, 5], [5, 6], [6, 7], [7, 4], 
+            [0, 4], [1, 5], [2, 6], [3, 7], 
+            [8, 0], [8, 1], [8, 2], [8, 3], [8, 4], [8, 5], [8, 6], [8, 7]
+        ];
+
+        const presets = {
+            daily:   { p1: 60, p2: 50, p3: 40, p4: 40, p5: 30, p6: 40, p7: 20, p8: 30, p9: 10 },
+            premium: { p1: 90, p2: 85, p3: 80, p4: 90, p5: 85, p6: 80, p7: 95, p8: 85, p9: 80 }
+        };
+
+        let currentValues = { ...presets.daily };
+
+        // --- UI生成 ---
+        const slidersContainer = document.getElementById('sliders');
+        axesConfig.forEach(axis => {
+            const group = document.createElement('div');
+            group.className = 'slider-group';
+            group.innerHTML = `
+                <div class="slider-label">
+                    <span style="color: #${axis.color.toString(16).padStart(6, '0')}">${axis.name}</span>
+                    <span id="val-${axis.id}">0</span>
+                </div>
+                <input type="range" id="slide-${axis.id}" min="0" max="100" value="50" oninput="updateAxis('${axis.id}', this.value)">
+            `;
+            slidersContainer.appendChild(group);
+        });
+
+        function updateAxis(id, value) {
+            currentValues[id] = parseFloat(value);
+            document.getElementById(`val-${id}`).innerText = value;
+            document.getElementById('btn-daily').classList.remove('active');
+            document.getElementById('btn-premium').classList.remove('active');
+            updateModel();
+        }
+
+        function loadPreset(key) {
+            currentValues = { ...presets[key] };
+            axesConfig.forEach(axis => {
+                document.getElementById(`slide-${axis.id}`).value = currentValues[axis.id];
+                document.getElementById(`val-${axis.id}`).innerText = currentValues[axis.id];
+            });
+            document.getElementById('btn-daily').classList.toggle('active', key === 'daily');
+            document.getElementById('btn-premium').classList.toggle('active', key === 'premium');
+            updateModel();
+        }
+
+        // --- Three.js 実装 ---
+        let scene, camera, renderer, controls;
+        let nodeMeshes = [], lineSegments;
+        let dynamicSphereGeometry, baseSpherePositions, dynamicSphereMesh;
+        const BASE_RADIUS = 1.5; 
+
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+            camera.position.set(3, 4, 6);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            // ライト
+            scene.add(new THREE.AmbientLight(0x555555));
+            const dLight1 = new THREE.DirectionalLight(0xffffff, 0.6);
+            dLight1.position.set(5, 10, 5);
+            scene.add(dLight1);
+            const dLight2 = new THREE.DirectionalLight(0x8844ff, 0.4);
+            dLight2.position.set(-5, -5, -5);
+            scene.add(dLight2);
+
+            // 1. 変形する外殻球体の生成 (頂点数を多めにして滑らかに)
+            dynamicSphereGeometry = new THREE.SphereGeometry(1, 48, 48);
+            baseSpherePositions = Array.from(dynamicSphereGeometry.attributes.position.array);
+            
+            const sphereMat = new THREE.MeshPhongMaterial({
+                color: 0x802040,
+                emissive: 0x2a0810,
+                transparent: true,
+                opacity: 0.35,
+                wireframe: false,
+                side: THREE.DoubleSide,
+                flatShading: false
+            });
+            dynamicSphereMesh = new THREE.Mesh(dynamicSphereGeometry, sphereMat);
+            scene.add(dynamicSphereMesh);
+
+            // 外殻球体のメッシュを強調するための薄いワイヤーフレーム表現を重ねる
+            const wireMat = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.08
+            });
+            const wireMesh = new THREE.Mesh(dynamicSphereGeometry, wireMat);
+            dynamicSphereMesh.add(wireMesh); // 親の変形に自動追従させる
+
+            // 2. 点（ノード）の生成
+            axesConfig.forEach(axis => {
+                const nodeGeo = new THREE.SphereGeometry(0.07, 16, 16);
+                const nodeMat = new THREE.MeshPhongMaterial({ color: axis.color, emissive: axis.color, emissiveIntensity: 0.5 });
+                const mesh = new THREE.Mesh(nodeGeo, nodeMat);
+                scene.add(mesh);
+                nodeMeshes.push(mesh);
+            });
+
+            // 3. 線（ラティス）の生成
+            const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 });
+            const lineGeo = new THREE.BufferGeometry();
+            const positions = new Float32Array(latticeConnections.length * 2 * 3);
+            lineGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            lineSegments = new THREE.LineSegments(lineGeo, lineMat);
+            scene.add(lineSegments);
+
+            loadPreset('daily');
+
+            function animate() {
+                requestAnimationFrame(animate);
+                controls.update();
+                scene.rotation.y += 0.0015; // 全体をゆっくり自動回転
+                renderer.render(scene, camera);
+            }
+            animate();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = container.clientWidth / container.clientHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(container.clientWidth, container.clientHeight);
+            });
+        }
+
+        // --- 全体更新ロジック（点、線、そして球体シェイプの同期） ---
+        function updateModel() {
+            if (nodeMeshes.length === 0 || !dynamicSphereGeometry) return;
+
+            const computedPositions = [];
+            const currentDistances = []; // 8つの外周点それぞれの現在の引き伸ばし距離を記録
+
+            // 1. 点（ノード）の位置計算
+            axesConfig.forEach((axis, i) => {
+                const weight = currentValues[axis.id] / 100; // 0.0 〜 1.0
+                let pos = new THREE.Vector3();
+
+                if (i === 8) {
+                    pos.set(0, 0, 0);
+                    const scale = 0.5 + weight * 2.5; 
+                    nodeMeshes[i].scale.set(scale, scale, scale);
+                } else {
+                    // 外周の8点
+                    const distance = BASE_RADIUS * (0.2 + weight * 1.1);
+                    currentDistances.push(distance);
+                    pos.copy(axis.dir).multiplyScalar(distance);
+                }
+
+                nodeMeshes[i].position.copy(pos);
+                computedPositions.push(pos);
+            });
+
+            // 2. ラティス（線）の同期
+            const linePosAttr = lineSegments.geometry.attributes.position;
+            let lineIdx = 0;
+            latticeConnections.forEach(pair => {
+                const startNode = computedPositions[pair[0]];
+                const endNode = computedPositions[pair[1]];
+                linePosAttr.setXYZ(lineIdx++, startNode.x, startNode.y, startNode.z);
+                linePosAttr.setXYZ(lineIdx++, endNode.x, endNode.y, endNode.z);
+            });
+            linePosAttr.needsUpdate = true;
+
+            // 3. 球体メッシュのリアルタイム変形（8つの外周点の影響度をブレンド）
+            const spherePosAttr = dynamicSphereGeometry.attributes.position;
+
+            for (let i = 0; i < spherePosAttr.count; i++) {
+                let bx = baseSpherePositions[i * 3];
+                let by = baseSpherePositions[i * 3 + 1];
+                let bz = baseSpherePositions[i * 3 + 2];
+                let v = new THREE.Vector3(bx, by, bz); // 元の球面の頂点（半径1）
+                
+                let dir = v.clone().normalize();
+                let targetRadius = 0;
+                let totalWeight = 0;
+
+                // 球面上の各頂点に対し、8つの方向ベクトルの近さに応じて半径を補間計算する
+                for (let j = 0; j < 8; j++) {
+                    let axisVec = axesConfig[j].dir;
+                    let dot = dir.dot(axisVec); // 向きの近さ (-1 〜 1)
+                    
+                    if (dot > 0) {
+                        // 鋭い歪みを表現するため、内積を4乗して影響範囲をシャープにする
+                        let influence = Math.pow(dot, 4);
+                        targetRadius += currentDistances[j] * influence;
+                        totalWeight += influence;
+                    }
+                }
+
+                // どこにもヒットしない場合の安全策、および滑らかなブレンド
+                if (totalWeight > 0) {
+                    targetRadius /= totalWeight;
+                } else {
+                    targetRadius = BASE_RADIUS * 0.2;
+                }
+
+                // 計算した新しい半径を頂点に適用
+                v.copy(dir).multiplyScalar(targetRadius);
+                spherePosAttr.setXYZ(i, v.x, v.y, v.z);
+            }
+
+            spherePosAttr.needsUpdate = true;
+            dynamicSphereGeometry.computeVertexNormals(); // ライティング（陰影）の再計算
+        }
+
+        window.onload = initThree;
+    </script>
+</body>
+</html>
